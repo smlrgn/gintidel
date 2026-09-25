@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:;"
+    />
+    <title>AI Session Editor</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="titlebar">
+      <div class="brand">
+        <span class="mark"></span>
+        <span class="name">Session Editor</span>
+      </div>
+      <div class="project-chip" id="projectChip">No project open</div>
+      <div class="title-actions">
+        <button type="button" id="btnOpenFolder">Open folder</button>
+        <button type="button" id="btnOpenFile" class="ghost">Open file</button>
+        <button type="button" id="btnSave" class="ghost" disabled>Save</button>
+      </div>
+    </header>
+
+    <div id="findBar" class="find-bar hidden">
+      <div class="find-title">Find</div>
+      <div class="find-body">
+        <input id="findInput" type="search" spellcheck="false" autocomplete="off" placeholder="Find in session" />
+        <span id="findCount">(0/0)</span>
+        <button type="button" class="ghost" id="findPrev" title="Previous (Shift+Enter)">‹</button>
+        <button type="button" class="ghost" id="findNext" title="Next (Enter)">›</button>
+        <button type="button" class="ghost" id="findClose" title="Close (Esc)">×</button>
+      </div>
+    </div>
+
+    <div class="workspace fill">
+      <aside class="pane files-pane" id="filesPane">
+        <div class="pane-head">
+          <span>Files</span>
+        </div>
+        <div class="pane-body" id="fileTree">
+          <div class="empty">Open a project folder to browse files.</div>
+        </div>
+      </aside>
+
+      <div class="split-handle" data-split="files"></div>
+
+      <main class="editor-col">
+        <div class="tabs" id="editorTabs"></div>
+        <div id="monacoHost" class="idle"></div>
+        <div id="timelineHost" class="timeline hidden"></div>
+        <button type="button" id="selDeleteBtn" class="sel-delete-btn hidden">Delete</button>
+        <div class="welcome" id="welcome">
+          <h1>Open a project</h1>
+          <p>
+            Browse the tree on the left. Session logs from Grok
+            (<code>updates.jsonl</code>) and Claude Code appear on the right.
+            Click a log to open it here as a timeline of prompts and file changes.
+          </p>
+          <button type="button" id="btnWelcomeOpen">Open folder</button>
+        </div>
+      </main>
+
+      <div class="split-handle" data-split="sessions"></div>
+
+      <aside class="pane sessions-pane" id="sessionsPane">
+        <div class="pane-head">
+          <span>Sessions</span>
+          <button type="button" class="icon-btn" id="btnReloadSessions" title="Reload">
+            ↻
+          </button>
+        </div>
+        <div class="session-tabs">
+          <button type="button" class="on" data-filter="all">All</button>
+          <button type="button" data-filter="grok">Grok</button>
+          <button type="button" data-filter="claude">Claude</button>
+        </div>
+        <div class="pane-body" id="sessionList">
+          <div class="empty">Session logs for this project will show up here.</div>
+        </div>
+      </aside>
+    </div>
+
+    <section class="changes-panel hidden" id="changesPanel">
+      <div class="pane-head">
+        <span id="changesTitle">AI changes</span>
+        <span class="muted" id="changesMeta"></span>
+      </div>
+      <div class="pane-body" id="changesBody">
+        <div class="empty">Open a file or a session log to see model edits.</div>
+      </div>
+    </section>
+
+    <script src="../node_modules/monaco-editor/min/vs/loader.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

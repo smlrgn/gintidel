@@ -1,0 +1,19 @@
+{
+  "name": "ai-session-editor",
+  "version": "1.0.0",
+  "description": "Project editor with Grok and Claude session logs",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^34.5.8"
+  },
+  "dependencies": {
+    "@receptron/laya": "^0.1.2",
+    "monaco-editor": "^0.52.2",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.24.7"
+  }
+}
