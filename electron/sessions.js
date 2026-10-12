@@ -444,6 +444,8 @@ function parseClaudeEdits(jsonlPath, projectRoot) {
         newText,
         oldLine: input.old_start || null,
         newLine: input.new_start || null,
+        contextBefore: input.context_before || "",
+        contextAfter: input.context_after || "",
         toolCallId: block.id || `line-${lineNo}`,
         timestamp: Date.parse(obj.timestamp || "") || null,
       });
@@ -539,8 +541,10 @@ function readDir(dir) {
 
 function readTextFile(filePath, { maxBytes = 8 * 1024 * 1024 } = {}) {
   const st = safeStat(filePath);
-  if (!st) throw new Error("File not found");
-  if (st.isDirectory()) throw new Error("Cannot open a directory as a file");
+  // Edit paths from a session are probed on folder open. A removed file is a result.
+  if (!st || st.isDirectory()) {
+    return { content: "", truncated: false, size: 0, missing: true };
+  }
   if (st.size > maxBytes) {
     const buf = Buffer.alloc(maxBytes);
     const fd = fs.openSync(filePath, "r");
@@ -815,6 +819,8 @@ function parseGrokEvents(jsonlPath, projectRoot) {
         kind: mutationKind(op),
         path: filePath,
         oldLine,
+        oldText,
+        newText,
         lines: diffLines(oldText, newText),
         toolCallId: id,
       };
@@ -883,6 +889,9 @@ function parseClaudeEvents(jsonlPath, projectRoot) {
         kind: mutationKind(op),
         path: filePath,
         oldLine: input.old_start || null,
+        oldText,
+        newText,
+        toolCallId: block.id || "",
         lines: oldText || newText ? diffLines(oldText, newText) : null,
       });
     }

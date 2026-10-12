@@ -16,6 +16,14 @@ const state = {
   findIndex: 0,
   selDeleteSeq: 0,
   selDeleteTimer: null,
+  revertPairs: new Map(),
+  updatePairs: new Map(),
+  absentNewIds: new Set(),
+  presentOldIds: new Set(),
+  revertErrors: new Map(),
+  revertBusy: false,
+  fileGen: new Map(),
+  timelineRender: 0,
 };
 
 const el = {
@@ -102,7 +110,7 @@ function initMonaco() {
       }
     });
     state.editor.onDidChangeCursorSelection(() => updateSelDeleteBtn());
-    state.editor.onDidScrollChange(() => updateSelDeleteBtn());
+    state.editor.onDidScrollChange(() => repositionSelDelete());
     state.monacoReady = true;
     if (state.activeTab) showTab(state.activeTab);
   });
@@ -231,6 +239,7 @@ async function openInEditor(filePath, { readOnly = false, activate = true } = {}
       }
     } else {
       const result = await api.readFile(filePath);
+      if (result.missing) return;
       tab.content = result.content;
       tab.saved = result.content;
     }
@@ -270,7 +279,254 @@ function showTab(filePath) {
   renderTabs();
 }
 
-function renderTimeline(events) {
+const REVERT_ICON =
+  '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M6.2 4.2 3.4 7l2.8 2.8"/><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M3.8 7H10a2.6 2.6 0 1 1 0 5.2H8"/></svg>';
+
+function revertPairId(item) {
+  const path = item.path || "";
+  const call = item.toolCallId || "";
+  if (call) return `${call}|${path}`;
+  return [
+    path,
+    item.oldLine || item.newLine || "",
+    String(item.oldText || "").length,
+    String(item.newText || "").length,
+    item.timestamp || item.timestampMs || "",
+  ].join("|");
+}
+
+function rememberUpdatePair(item) {
+  if (!item || !item.path || isSessionLog(item.path)) return "";
+  if (!item.oldText && !item.newText) return "";
+  const id = revertPairId(item);
+  state.updatePairs.set(id, {
+    id,
+    path: item.path,
+    oldText: item.oldText || "",
+    newText: item.newText || "",
+  });
+  if (item.oldText) {
+    state.revertPairs.set(id, {
+      id,
+      path: item.path,
+      oldText: item.oldText,
+      newText: item.newText || "",
+    });
+  }
+  return id;
+}
+
+function revertControlVisible(id, mode) {
+  const pair = state.updatePairs.get(id);
+  if (!pair) return false;
+  const newPresent = !!pair.newText && !state.absentNewIds.has(id);
+  const oldPresent = !!pair.oldText && state.presentOldIds.has(id);
+  if (mode === "new") return !newPresent && oldPresent;
+  return newPresent && !!pair.oldText;
+}
+
+function revertControlHtml(id, mode) {
+  const on = revertControlVisible(id, mode);
+  const label = mode === "new" ? "Restore the new text" : "Revert this change";
+  return `<span class="revert-control${on ? "" : " is-off"}"><button type="button" class="revert-btn" data-revert-id="${escapeHtml(
+    id
+  )}" data-revert-mode="${mode}" title="${label}" aria-label="${label}">${REVERT_ICON}</button><span class="revert-error" aria-hidden="true">!</span></span>`;
+}
+
+function replaceOnce(fileText, needle, replacement) {
+  const file = String(fileText ?? "");
+  const from = String(needle ?? "");
+  const to = String(replacement ?? "");
+  if (!from) return { ok: false, reason: "missing" };
+  const at = file.indexOf(from);
+  if (at < 0) return { ok: false, reason: "missing" };
+  if (file.indexOf(from, at + from.length) >= 0) return { ok: false, reason: "multiple" };
+  return { ok: true, content: file.slice(0, at) + to + file.slice(at + from.length) };
+}
+
+function paintRevertErrors() {
+  document.querySelectorAll(".revert-control").forEach((wrap) => {
+    const btn = wrap.querySelector(".revert-btn");
+    const mark = wrap.querySelector(".revert-error");
+    if (!btn || !mark) return;
+    const reason = state.revertErrors.get(btn.dataset.revertId) || "";
+    mark.classList.toggle("is-shown", !!reason);
+    mark.title = reason;
+  });
+}
+
+function showRevertError(id, reason) {
+  state.revertErrors.set(id, reason);
+  paintRevertErrors();
+}
+
+function paintAbsentNewText() {
+  document.querySelectorAll("[data-new-id]").forEach((node) => {
+    node.classList.toggle("new-absent", state.absentNewIds.has(node.dataset.newId));
+  });
+}
+
+function paintRevertButtons() {
+  document.querySelectorAll(".revert-control").forEach((wrap) => {
+    const btn = wrap.querySelector(".revert-btn");
+    if (!btn) return;
+    const on = revertControlVisible(btn.dataset.revertId, btn.dataset.revertMode || "old");
+    wrap.classList.toggle("is-off", !on);
+  });
+}
+
+function applyAbsent(updates) {
+  for (const update of updates) {
+    if (update.absent) state.absentNewIds.add(update.id);
+    else state.absentNewIds.delete(update.id);
+    if (update.oldPresent) state.presentOldIds.add(update.id);
+    else state.presentOldIds.delete(update.id);
+  }
+  paintAbsentNewText();
+  paintRevertButtons();
+}
+
+async function findAbsentIds(pairs, known) {
+  const list = [];
+  const seen = new Set();
+  for (const pair of pairs) {
+    if (!pair || !pair.id || seen.has(pair.id)) continue;
+    if (!pair.newText && !pair.oldText) continue;
+    seen.add(pair.id);
+    list.push(pair);
+  }
+  const byPath = new Map();
+  for (const pair of list) {
+    if (!byPath.has(pair.path)) byPath.set(pair.path, []);
+    byPath.get(pair.path).push(pair);
+  }
+  const started = new Map();
+  for (const path of byPath.keys()) started.set(path, state.fileGen.get(path) || 0);
+
+  const texts = new Map();
+  await Promise.all(
+    [...byPath.keys()].map(async (path) => {
+      if (known && known.has(path)) {
+        texts.set(path, known.get(path));
+        return;
+      }
+      const live = editorText(path);
+      if (live != null) {
+        texts.set(path, live);
+        return;
+      }
+      try {
+        const file = await api.readFile(path);
+        texts.set(path, file.truncated ? null : file.content);
+      } catch {
+        texts.set(path, null);
+      }
+    })
+  );
+
+  const updates = [];
+  for (const pair of list) {
+    if ((state.fileGen.get(pair.path) || 0) !== started.get(pair.path)) continue;
+    const text = texts.get(pair.path);
+    if (text == null) continue;
+    const newAbsent = pair.newText ? text.indexOf(pair.newText) < 0 : true;
+    const oldPresent = pair.oldText ? text.indexOf(pair.oldText) >= 0 : false;
+    updates.push({ id: pair.id, absent: newAbsent, oldPresent });
+  }
+  return updates;
+}
+
+function editorText(filePath) {
+  if (!(state.monacoReady && window.monaco)) return null;
+  const model = monaco.editor.getModel(monaco.Uri.file(filePath));
+  if (!model) return null;
+  return model.getValue();
+}
+
+function syncRevertedFile(filePath, content) {
+  const tab = state.tabs.find((t) => pathsEqual(t.path, filePath));
+  if (tab) tab.loading = true;
+  if (state.monacoReady && window.monaco) {
+    const model = monaco.editor.getModel(monaco.Uri.file(filePath));
+    if (model && model.getValue() !== content) model.setValue(content);
+  }
+  if (!tab) return;
+  tab.content = content;
+  tab.saved = content;
+  tab.dirty = false;
+  tab.loading = false;
+  if (currentTab() === tab) {
+    el.btnSave.disabled = true;
+    renderTabs();
+  }
+}
+
+async function revertPair(id, mode) {
+  if (state.revertBusy) return;
+  const pair = state.revertPairs.get(id);
+  if (!pair || isSessionLog(pair.path)) return;
+  const restoreNew = mode === "new";
+  state.revertBusy = true;
+  try {
+    let content = editorText(pair.path);
+    let truncated = false;
+    if (content == null) {
+      const file = await api.readFile(pair.path);
+      content = file.content;
+      truncated = !!file.truncated;
+    }
+    if (truncated) {
+      showRevertError(id, "File is too large to revert safely");
+      return;
+    }
+    const plan = restoreNew
+      ? replaceOnce(content, pair.oldText, pair.newText)
+      : replaceOnce(content, pair.newText, pair.oldText);
+    if (!plan.ok) {
+      const which = restoreNew ? "Old text" : "New text";
+      showRevertError(
+        id,
+        plan.reason === "multiple" ? `${which} appears more than once` : `${which} is not in the file`
+      );
+      return;
+    }
+    state.fileGen.set(pair.path, (state.fileGen.get(pair.path) || 0) + 1);
+    await api.writeFile(pair.path, plan.content);
+    syncRevertedFile(pair.path, plan.content);
+    state.revertErrors.delete(id);
+    paintRevertErrors();
+    const sameFile = [...state.updatePairs.values()].filter((item) =>
+      pathsEqual(item.path, pair.path)
+    );
+    applyAbsent(await findAbsentIds(sameFile, new Map([[pair.path, plan.content]])));
+  } catch (err) {
+    showRevertError(id, err.message || "Could not revert this change");
+  } finally {
+    state.revertBusy = false;
+  }
+}
+
+function onRevertClick(e) {
+  const btn = e.target.closest && e.target.closest(".revert-btn");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  revertPair(btn.dataset.revertId, btn.dataset.revertMode);
+}
+
+function onRevertMouseDown(e) {
+  if (e.target.closest && e.target.closest(".revert-btn")) e.preventDefault();
+}
+
+function diffLineHtml(line, control, newId) {
+  const cls = line.type === "add" ? "add" : line.type === "del" ? "del" : "";
+  const absent = cls === "add" && newId && state.absentNewIds.has(newId) ? " new-absent" : "";
+  const attr = cls === "add" && newId ? ` data-new-id="${escapeHtml(newId)}"` : "";
+  const mark = line.type === "add" ? "+" : line.type === "del" ? "-" : " ";
+  return `<div class="diff-line ${cls}${absent}"${attr}>${control || ""}${mark} ${escapeHtml(line.text)}</div>`;
+}
+
+async function renderTimeline(events) {
   const rows = (events || []).filter((ev) =>
     ["Prompt", "Create", "Edit", "Delete"].includes(ev.operation)
   );
@@ -278,7 +534,19 @@ function renderTimeline(events) {
     el.timelineHost.innerHTML = `<div class="empty">No create, edit, or delete operations in this session.</div>`;
     return;
   }
+  const token = ++state.timelineRender;
+  const pairs = [];
+  for (const ev of rows) {
+    const id = rememberUpdatePair(ev);
+    if (id) pairs.push(state.updatePairs.get(id));
+  }
+  const absent = await findAbsentIds(pairs);
+  if (token !== state.timelineRender) return;
+  applyAbsent(absent);
+  if (token !== state.timelineRender) return;
+
   const MAX_DIFF = 48;
+  const hiddenDiffLines = [];
   el.timelineHost.innerHTML = rows
     .map((ev) => {
       let body = "";
@@ -293,20 +561,41 @@ function renderTimeline(events) {
         }
       }
       if (Array.isArray(ev.lines) && ev.lines.length) {
-        const extra = ev.lines.length > MAX_DIFF ? ev.lines.length - MAX_DIFF : 0;
         const shown = ev.lines.slice(0, MAX_DIFF);
-        const rows = shown
+        const rest = ev.lines.slice(MAX_DIFF);
+        let more = "";
+        const pairId = rememberUpdatePair(ev);
+        const newId = pairId && ev.newText ? pairId : "";
+        const revertId = pairId && ev.oldText ? pairId : "";
+        if (rest.length) {
+          const id = hiddenDiffLines.length;
+          hiddenDiffLines.push({ lines: rest, newId });
+          more = `<div class="diff-more" data-more="${id}">${rest.length} more lines</div>`;
+        }
+        let placedOld = false;
+        let placedNew = false;
+        const shownHtml = shown
           .map((line) => {
-            const cls = line.type === "add" ? "add" : line.type === "del" ? "del" : "";
-            const mark = line.type === "add" ? "+" : line.type === "del" ? "-" : " ";
-            return `<div class="diff-line ${cls}">${mark} ${escapeHtml(line.text)}</div>`;
+            let control = "";
+            if (revertId && !placedOld && line.type === "del") {
+              control = revertControlHtml(revertId, "old");
+              placedOld = true;
+            } else if (revertId && newId && !placedNew && line.type === "add") {
+              control = revertControlHtml(newId, "new");
+              placedNew = true;
+            }
+            return diffLineHtml(line, control, newId);
           })
           .join("");
-        body += `<div class="event-diff">${rows}${
-          extra ? `<div class="diff-more">${extra} more lines</div>` : ""
-        }</div>`;
+        const lead = [
+          revertId && !placedOld ? revertControlHtml(revertId, "old") : "",
+          revertId && newId && !placedNew ? revertControlHtml(newId, "new") : "",
+        ].join("");
+        body += `<div class="event-diff">${lead}${shownHtml}${more}</div>`;
       }
-      return `<div class="event-row kind-${escapeHtml(ev.kind || "other")}">
+      return `<div class="event-row kind-${escapeHtml(ev.kind || "other")}" data-path="${escapeHtml(
+        ev.path || ""
+      )}">
         <div class="event-time">${escapeHtml(ev.time)}</div>
         <div class="event-main">${body}</div>
       </div>`;
@@ -321,10 +610,25 @@ function renderTimeline(events) {
         : "Double-click to expand";
     });
   });
+  el.timelineHost.querySelectorAll(".diff-more").forEach((more) => {
+    more.addEventListener("click", () => {
+      const item = hiddenDiffLines[Number(more.dataset.more)] || { lines: [] };
+      const rest = item.lines || [];
+      more.insertAdjacentHTML(
+        "beforebegin",
+        rest.map((line) => diffLineHtml(line, "", item.newId)).join("")
+      );
+      more.remove();
+      if (!el.findBar.classList.contains("hidden") && el.findInput.value) {
+        runFind(false);
+      }
+    });
+  });
   if (!el.findBar.classList.contains("hidden") && el.findInput.value) {
     runFind(false);
   }
-  el.timelineHost.onscroll = () => updateSelDeleteBtn();
+  paintRevertErrors();
+  el.timelineHost.onscroll = () => repositionSelDelete();
 }
 
 function hideSelDelete() {
@@ -345,7 +649,15 @@ function monacoSelDeleteTop() {
   const sel = state.editor.getSelection();
   if (!sel || sel.isEmpty()) return null;
   const line = sel.selectionStartLineNumber;
-  const lineHeight = state.editor.getOption(monaco.editor.EditorOption.lineHeight);
+  let lineHeight = 19;
+  try {
+    const opt = monaco.editor.EditorOption;
+    if (opt && opt.lineHeight != null) {
+      lineHeight = state.editor.getOption(opt.lineHeight) || lineHeight;
+    }
+  } catch {
+    /* keep default */
+  }
   const yInEditor = state.editor.getTopForLineNumber(line) - state.editor.getScrollTop();
   if (yInEditor + lineHeight < 0 || yInEditor > el.monacoHost.clientHeight) return null;
   const host = el.monacoHost.getBoundingClientRect();
@@ -383,30 +695,219 @@ function selectedEditorText() {
   return model.getValueInRange(sel);
 }
 
+function selectedEditorLines() {
+  if (!state.editor || el.monacoHost.classList.contains("idle")) return [];
+  const sel = state.editor.getSelection();
+  const model = state.editor.getModel();
+  if (!sel || !model || sel.isEmpty()) return [];
+  const lines = [];
+  for (let n = sel.startLineNumber; n <= sel.endLineNumber; n++) {
+    const full = model.getLineContent(n);
+    const start = n === sel.startLineNumber ? sel.startColumn - 1 : 0;
+    const end = n === sel.endLineNumber ? sel.endColumn - 1 : full.length;
+    lines.push({ full, start, end });
+  }
+  return lines;
+}
+
+function selectionAnchorElement() {
+  const sel = window.getSelection();
+  if (!sel || !sel.anchorNode) return null;
+  return sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+}
+
+function stripDiffPrefixes(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[+\- ] /, ""))
+    .join("\n");
+}
+
+function selectedTimelineText() {
+  if (el.timelineHost.classList.contains("hidden")) return "";
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.anchorNode) return "";
+  if (!el.timelineHost.contains(sel.anchorNode)) return "";
+  if (el.findBar.contains(sel.anchorNode)) return "";
+  let text = sel.toString();
+  const node = selectionAnchorElement();
+  if (node && node.closest && node.closest(".event-diff")) {
+    text = stripDiffPrefixes(text);
+  }
+  return text;
+}
+
+function rangeOffsetsInElement(el, range) {
+  if (!el || !range) return null;
+  try {
+    if (!range.intersectsNode(el)) return null;
+  } catch {
+    return null;
+  }
+  const contents = document.createRange();
+  contents.selectNodeContents(el);
+  const clipped = range.cloneRange();
+  if (clipped.compareBoundaryPoints(Range.START_TO_START, contents) < 0) {
+    clipped.setStart(contents.startContainer, contents.startOffset);
+  }
+  if (clipped.compareBoundaryPoints(Range.END_TO_END, contents) > 0) {
+    clipped.setEnd(contents.endContainer, contents.endOffset);
+  }
+  if (clipped.collapsed) {
+    return { full: el.textContent || "", start: 0, end: 0 };
+  }
+  const before = document.createRange();
+  before.selectNodeContents(el);
+  before.setEnd(clipped.startContainer, clipped.startOffset);
+  const start = before.toString().length;
+  return {
+    full: el.textContent || "",
+    start,
+    end: start + clipped.toString().length,
+  };
+}
+
+function stripDiffLineSpan(span) {
+  const full = String(span.full || "");
+  const match = full.match(/^[+\- ] /);
+  const prefix = match ? match[0].length : 0;
+  return {
+    full: full.slice(prefix),
+    start: Math.max(0, span.start - prefix),
+    end: Math.max(0, span.end - prefix),
+  };
+}
+
+function selectedTimelineLines() {
+  if (el.timelineHost.classList.contains("hidden")) return [];
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.anchorNode || !sel.rangeCount) return [];
+  if (!el.timelineHost.contains(sel.anchorNode)) return [];
+  if (el.findBar.contains(sel.anchorNode)) return [];
+  const node = selectionAnchorElement();
+  if (!node || !node.closest) return [];
+  const row = node.closest(".event-row");
+  if (!row) return [];
+  const range = sel.getRangeAt(0);
+  const lines = [];
+  row.querySelectorAll(".diff-line").forEach((lineEl) => {
+    const span = rangeOffsetsInElement(lineEl, range);
+    if (!span || span.end <= span.start) return;
+    lines.push(stripDiffLineSpan(span));
+  });
+  return lines;
+}
+
+function selectedTimelineExt() {
+  const node = selectionAnchorElement();
+  if (!node || !node.closest) return "";
+  const row = node.closest(".event-row");
+  const p = row && row.dataset.path;
+  if (p) return api.extname(p);
+  return ".js";
+}
+
+function selDeleteContext() {
+  if (el.welcome && !el.welcome.classList.contains("hidden")) return null;
+  if (!el.monacoHost.classList.contains("idle")) {
+    let top = null;
+    try {
+      top = monacoSelDeleteTop();
+    } catch {
+      return null;
+    }
+    const text = selectedEditorText();
+    if (top == null || !String(text).trim()) return null;
+    const ext = state.activeTab ? api.extname(state.activeTab) : "";
+    const sel = state.editor && state.editor.getSelection();
+    const range =
+      sel && !sel.isEmpty()
+        ? {
+            startLine: sel.startLineNumber,
+            startColumn: sel.startColumn,
+            endLine: sel.endLineNumber,
+            endColumn: sel.endColumn,
+          }
+        : null;
+    return { top, text, ext, lines: selectedEditorLines(), range };
+  }
+  if (timelineOpen()) {
+    const top = timelineSelDeleteTop();
+    const text = selectedTimelineText();
+    if (top == null || !String(text).trim()) return null;
+    const node = selectionAnchorElement();
+    const row = node && node.closest && node.closest(".event-row");
+    const filePath = (row && row.dataset.path) || "";
+    return { top, text, ext: selectedTimelineExt(), lines: selectedTimelineLines(), filePath };
+  }
+  return null;
+}
+
+async function fileTextForSelection(ctx) {
+  if (!ctx) return "";
+  if (ctx.range && state.editor && !el.monacoHost.classList.contains("idle")) {
+    const model = state.editor.getModel();
+    return model ? model.getValue() : "";
+  }
+  if (ctx.filePath) {
+    try {
+      const result = await api.readFile(ctx.filePath);
+      return (result && result.content) || "";
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function repositionSelDelete() {
+  if (el.selDeleteBtn.classList.contains("hidden")) return;
+  const ctx = selDeleteContext();
+  if (!ctx) hideSelDelete();
+  else placeSelDelete(ctx.top);
+}
+
 function updateSelDeleteBtn() {
-  hideSelDelete();
+  const ctx = selDeleteContext();
   if (state.selDeleteTimer) {
     clearTimeout(state.selDeleteTimer);
     state.selDeleteTimer = null;
   }
-  if (el.welcome && !el.welcome.classList.contains("hidden")) return;
-  if (el.monacoHost.classList.contains("idle")) return;
-  const top = monacoSelDeleteTop();
-  const text = selectedEditorText();
-  const ext = state.activeTab ? api.extname(state.activeTab) : "";
-  if (top == null || !text.trim()) return;
+  if (!ctx) {
+    state.selDeleteSeq += 1;
+    hideSelDelete();
+    return;
+  }
+  if (!api.highlightLineRuleOk(ctx.ext, ctx.lines)) {
+    state.selDeleteSeq += 1;
+    hideSelDelete();
+    return;
+  }
   const seq = ++state.selDeleteSeq;
+  const { text, ext, lines } = ctx;
   state.selDeleteTimer = setTimeout(async () => {
     try {
-      const result = await api.validateHighlight({ ext, text });
+      const fileText = await fileTextForSelection(ctx);
+      const result = await api.validateHighlight({
+        ext,
+        text,
+        lines,
+        fileText,
+        range: ctx.range,
+      });
       if (seq !== state.selDeleteSeq) return;
-      if (!result || !result.ok) return;
-      const topNow = monacoSelDeleteTop();
-      if (topNow != null) placeSelDelete(topNow);
+      if (!result || !result.ok) {
+        hideSelDelete();
+        return;
+      }
+      const now = selDeleteContext();
+      if (now) placeSelDelete(now.top);
+      else hideSelDelete();
     } catch {
-      /* keep hidden */
+      if (seq !== state.selDeleteSeq) return;
+      hideSelDelete();
     }
-  }, 280);
+  }, 120);
 }
 
 function timelineOpen() {
@@ -693,6 +1194,13 @@ async function refreshChanges() {
     return;
   }
 
+  const pairs = [];
+  for (const edit of filtered) {
+    const id = rememberUpdatePair(edit);
+    if (id) pairs.push(state.updatePairs.get(id));
+  }
+  applyAbsent(await findAbsentIds(pairs));
+
   el.changesBody.innerHTML = "";
   for (const edit of filtered) {
     const card = document.createElement("div");
@@ -701,13 +1209,26 @@ async function refreshChanges() {
       edit.oldLine || edit.newLine
         ? `line ${edit.oldLine || edit.newLine}`
         : "no line number";
+    const pairId = rememberUpdatePair(edit);
+    const newId = pairId && edit.newText ? pairId : "";
     card.innerHTML = `
       <header>
         <span>${escapeHtml(edit.relPath || edit.path)} <span class="line-tag">${line}</span></span>
         <span class="muted">${escapeHtml(edit.tool)} · ${edit.provider}</span>
       </header>
-      <pre>${renderDiff(edit.oldText, edit.newText)}</pre>
+      <pre>${renderDiff(edit.oldText, edit.newText, newId)}</pre>
     `;
+    const revertId = pairId && edit.oldText ? pairId : "";
+    if (revertId) {
+      const del = card.querySelector("pre .del");
+      if (del) del.insertAdjacentHTML("afterbegin", revertControlHtml(revertId, "old"));
+      else {
+        const pre = card.querySelector("pre");
+        if (pre) pre.insertAdjacentHTML("afterbegin", revertControlHtml(revertId, "old"));
+      }
+      const add = card.querySelector("pre .add");
+      if (add && newId) add.insertAdjacentHTML("afterbegin", revertControlHtml(newId, "new"));
+    }
     card.querySelector("header").addEventListener("click", async () => {
       if (edit.path) {
         try {
@@ -723,6 +1244,7 @@ async function refreshChanges() {
     });
     el.changesBody.appendChild(card);
   }
+  paintRevertErrors();
 }
 
 function relToProject(abs) {
@@ -737,9 +1259,14 @@ function pathsEqual(a, b) {
   return a.replace(/\\/g, "/") === b.replace(/\\/g, "/");
 }
 
-function renderDiff(oldText, newText) {
+function renderDiff(oldText, newText, newId) {
+  const add = (html) => {
+    const absent = newId && state.absentNewIds.has(newId) ? " new-absent" : "";
+    const attr = newId ? ` data-new-id="${escapeHtml(newId)}"` : "";
+    return `<span class="add${absent}"${attr}>${html}</span>`;
+  };
   if (!oldText && newText) {
-    return `<span class="add">${escapeHtml(newText)}</span>`;
+    return add(escapeHtml(newText));
   }
   const oldLines = String(oldText || "").split("\n");
   const newLines = String(newText || "").split("\n");
@@ -749,7 +1276,7 @@ function renderDiff(oldText, newText) {
   }
   if (max > 80) {
     const shownOld = oldLines.slice(0, 12).map((l) => `<span class="del">- ${escapeHtml(l)}</span>`).join("\n");
-    const shownNew = newLines.slice(0, 12).map((l) => `<span class="add">+ ${escapeHtml(l)}</span>`).join("\n");
+    const shownNew = newLines.slice(0, 12).map((l) => add(`+ ${escapeHtml(l)}`)).join("\n");
     return `${shownOld}\n${shownNew}\n<span class="muted">… truncated</span>`;
   }
   const oldSet = new Set(oldLines);
@@ -759,7 +1286,7 @@ function renderDiff(oldText, newText) {
     if (!newSet.has(line)) parts.push(`<span class="del">- ${escapeHtml(line)}</span>`);
   }
   for (const line of newLines) {
-    if (!oldSet.has(line)) parts.push(`<span class="add">+ ${escapeHtml(line)}</span>`);
+    if (!oldSet.has(line)) parts.push(add(`+ ${escapeHtml(line)}`));
   }
   return parts.join("\n") || `<span class="muted">(whitespace-only)</span>`;
 }
@@ -807,7 +1334,7 @@ function bindSplits() {
           which === "files" ? startW + dx : startW - dx;
         pane.style.width = `${Math.max(180, Math.min(480, next))}px`;
         positionFindBar();
-      };
+       };
       const onUp = () => {
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
@@ -830,8 +1357,28 @@ document.getElementById("btnOpenFile").addEventListener("click", () => api.openF
 document.getElementById("btnSave").addEventListener("click", saveActive);
 document.getElementById("btnReloadSessions").addEventListener("click", loadSessions);
 
+async function analyzeDeletePayload() {
+  const ctx = selDeleteContext();
+  if (!ctx) return null;
+  const payload = { ext: ctx.ext, text: ctx.text, lines: ctx.lines };
+  const fileText = await fileTextForSelection(ctx);
+  if (fileText) payload.fileText = fileText;
+  if (ctx.range) payload.range = ctx.range;
+  return payload;
+}
+
 el.selDeleteBtn.addEventListener("mousedown", (e) => {
   e.preventDefault();
+});
+el.selDeleteBtn.addEventListener("click", async () => {
+  const payload = await analyzeDeletePayload();
+  if (!payload) return;
+  try {
+    const result = await api.analyzeHighlightedStatement(payload);
+    console.log("analyzeHighlightedStatement", result);
+  } catch (err) {
+    console.error("analyzeHighlightedStatement failed", err);
+  }
 });
 document.addEventListener("selectionchange", () => {
   if (timelineOpen()) updateSelDeleteBtn();
@@ -896,4 +1443,6 @@ api.onSave(saveActive);
 api.onReloadSessions(loadSessions);
 
 bindSplits();
+document.addEventListener("click", onRevertClick);
+document.addEventListener("mousedown", onRevertMouseDown);
 initMonaco();

@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require("electron");
 const path = require("path");
+const { highlightLineRuleOk } = require("./line-rule");
 
 contextBridge.exposeInMainWorld("api", {
   openFolder: () => ipcRenderer.invoke("dialog:openFolder"),
@@ -16,6 +17,9 @@ contextBridge.exposeInMainWorld("api", {
   showInFolder: (filePath) => ipcRenderer.invoke("shell:show", filePath),
   validateHighlight: (payload) =>
     ipcRenderer.invoke("laya:validateHighlight", payload),
+  analyzeHighlightedStatement: (payload) =>
+    ipcRenderer.invoke("laya:analyzeHighlightedStatement", payload),
+  highlightLineRuleOk: (ext, lines) => highlightLineRuleOk(ext, lines),
   onProjectOpened: (cb) => {
     ipcRenderer.on("project:opened", (_e, data) => cb(data));
   },

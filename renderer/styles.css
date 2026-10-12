@@ -165,7 +165,7 @@ code {
 .sel-delete-btn {
   position: absolute;
   left: 6px;
-  z-index: 12;
+  z-index: 40;
   padding: 3px 8px;
   font-size: 11px;
   line-height: 1.2;
@@ -334,12 +334,14 @@ code {
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.45;
+  user-select: text;
 }
 
 .diff-line {
   padding: 1px 10px;
   white-space: pre-wrap;
   word-break: break-word;
+  user-select: text;
 }
 
 .diff-line.add {
@@ -347,9 +349,57 @@ code {
   color: #d8f3dc;
 }
 
+.diff-line.add.new-absent,
+.add.new-absent {
+  background: #7a6412;
+  color: #fff4c2;
+}
+
 .diff-line.del {
   background: #6a1c23;
   color: #ffccd2;
+}
+
+.revert-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 6px;
+  vertical-align: middle;
+  user-select: none;
+}
+
+.revert-control.is-off {
+  display: none;
+}
+
+.revert-btn {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: #3a1d22;
+  color: #ffccd2;
+  border: 1px solid #8a3038;
+}
+
+.revert-btn:hover {
+  background: #5a242c;
+}
+
+.revert-error {
+  display: none;
+  color: var(--danger);
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.revert-error.is-shown {
+  display: inline;
 }
 
 .diff-more {
@@ -357,6 +407,13 @@ code {
   color: var(--muted);
   font-size: 11px;
   background: var(--bg-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.diff-more:hover {
+  color: var(--text);
+  background: var(--bg-3);
 }
 
 .welcome {

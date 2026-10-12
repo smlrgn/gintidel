@@ -1,13 +1,10 @@
-# AI Session Editor
+# GINTIDEL
+GINTIDEL is an `understanding` tool that makes it easier to observe model code outputs by either plugging into or rewinding their ACP streams. It supports deterministic rollbacks of model changes by using the rewind button. 
+![interface](interface.png)
 
-Electron editor for a project folder plus the most recent **Grok** and **Claude Code** session logs for that folder.
+It neatly shows the code output produced by the model for a project across several sessions, with code that has been later overwritten shown with a yellow background.
 
-- **Left:** project file tree
-- **Center:** Monaco editor
-- **Right:** session logs (`updates.jsonl` for Grok, `<session-id>.jsonl` for Claude)
-- **Bottom:** parsed AI file edits (path, starting line, old/new text)
-
-## Run
+![interface](image.png)
 
 ```bash
 npm install
@@ -24,9 +21,3 @@ Then **Open folder** and choose a repo. The right pane lists session files under
 Click a row to open that JSONL in the editor. Open a source file to filter the bottom panel to edits that touched that file.
 
 Session JSONL files are read-only so transcripts are not overwritten.
-
-## Laya ONNX
-
-Selecting code in the editor uses **tree-sitter** (`electron/syntax.js`) to check that the highlight is complete statements/declarations in that language. The Delete button appears only if the span parses cleanly.
-
-Laya ONNX remains in `electron/laya.js` but is not used for this check.

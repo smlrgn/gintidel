@@ -2,7 +2,6 @@ const { app, BrowserWindow, dialog, ipcMain, Menu, shell } = require("electron")
 const fs = require("fs");
 const path = require("path");
 const sessions = require("./sessions");
-const layaOnnx = require("./laya");
 const syntax = require("./syntax");
 
 let mainWindow = null;
@@ -15,7 +14,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     backgroundColor: "#0e1014",
-    title: "AI Session Editor",
+    title: "Gintidel",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -162,6 +161,15 @@ ipcMain.handle("laya:validateHighlight", async (_evt, payload) => {
   try {
     return await syntax.validateHighlight(payload || {});
   } catch (err) {
+    console.error("validateHighlight failed", err);
+    return { ok: false, error: err.message || String(err) };
+  }
+});
+ipcMain.handle("laya:analyzeHighlightedStatement", async (_evt, payload) => {
+  try {
+    return await syntax.analyzeHighlightedStatement(payload || {});
+  } catch (err) {
+    console.error("analyzeHighlightedStatement failed", err);
     return { ok: false, error: err.message || String(err) };
   }
 });
